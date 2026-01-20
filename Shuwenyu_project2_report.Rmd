@@ -1,0 +1,660 @@
+---
+title: "Shuwenyu BF528 Project2 Report"
+author: "Shuwenyu"
+date: "`r format(Sys.Date(), '%Y-%m-%d')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: false
+    df_print: kable
+    code_folding: show
+  pdf_document:
+    latex_engine: xelatex  
+    number_sections: false
+---
+
+# Shuwenyu BF528 Project2 Report
+
+## Introduction
+
+-   What is the biological background of the study?
+
+Type 1 diabetes(T1D) is a long lasting autoimmune condition where the immune system mistakenly attacks and destroys the insulin-producing beta cells in the pancreas. A key gene linked to T1D risk is tyrosine kinase2(TYK) a part of the JAK family, strongly liked to T1D risk because it's vital for type-l interferon (IFN-I) signaling, which promotes the immune attack on ß-cells. Understanding TYK2's role in pancreatic development, function, and its response to immune challenges is crucial for developing new treatments for T1D.
+
+-   Why was the study performed?
+
+The study was performed to understand the role of the T1D candidate gene, TYK2, in pancreatic β-cell development, function, and its responses to immune challenges like type-I interferons. The goal was to uncover mechanisms through which TYK2 contributes to T1D and identify potential therapeutic targets to halt its progression.
+
+-   Why did the authors use the bioinformatic techniques they did?
+
+• Deep RNA sequencing (RNA-seq) and Principal Component Analysis (PCA): These were used to globally map gene expression patterns throughout pancreatic development in both wild-type and TYK2 knockout cells. This helped identify T1D candidate genes, confirm TYK2's expression profile, and uncover broad transcriptional changes, such as the unexpected upregulation of KRAS, distinguishing the TYK2 KO phenotype. PCA specifically visualized these differences across developmental stages.
+
+• Reactome and KEGG enrichment analyses: Applied to both bulk and single-cell RNA-seq data, these analyses helped pinpoint specific biological pathways and processes significantly affected by TYK2 loss. This was crucial for understanding how TYK2 impacts β-cell development, cell cycle regulation, and immune responses like antigen processing and presentation.
+
+• Single-cell RNA sequencing (scRNA-seq): This advanced technique allowed for a detailed, specific understanding of how TYK2 knockout impacted different pancreatic cell populations and their responses to interferon-α. It provided granular insights into which cell types were most affected and the specific genes involved. The Seurat pipeline was essential for processing and interpreting this complex single-cell data, including estimating cell cycle phases.
+
+• Correlation studies using existing human RNA-seq datasets: By analyzing data from human fetal pancreatic and adult islets, the authors could corroborate their findings from stem cell models with real human tissue, validating the physiological relevance of TYK2's correlation with genes like NEUROG3, INS, and KRAS.
+
+• Phenome-wide association analysis (FinnGen cohort): This large-scale genetic analysis was used to confirm in a real-world human population that specific loss of function TYK2 gene variants offer protection against T1D and other autoimmune diseases, providing strong clinical validation for the therapeutic potential of TYK2 inhibition.
+
+## Methods
+
+All analyses were performed using a Nextflow-based RNA-seq pipeline executed with the command nextflow run main.nf -profile singularity,local. Each process was containerized using pre-built Singularity images hosted in the BF528 GitHub Container Registry (e.g., ghcr.io/bf528/star:latest). These containers ensured version consistency and reproducibility across all tools, including FastQC, MultiQC, STAR, VERSE, and pandas/Python utilities.
+
+-   Gene Annotation Parsing (PARSE_GTF)
+
+To extract gene-level information from the reference annotation, a custom Python script (parse_gtf.py) was used to parse the GTF file and generate a tab-delimited mapping between Ensembl gene IDs and gene symbols. This step was run within the ghcr.io/bf528/pandas:latest container using the following parameters:
+
+python parse_gtf.py -i \<annotation.gtf\> -o gene_ids_to_names.txt
+
+The -i flag specified the input GTF file, and -o defined the output file path. All other settings followed the script’s default configuration. The resulting file (gene_ids_to_names.txt) was later used for gene name annotation in downstream DESeq2 analysis.
+
+-   Quality Control of Raw Reads (FASTQC)
+
+Sequencing read quality was assessed using FastQC (v0.12.1) within the ghcr.io/bf528/fastqc:latest container. Each paired-end FASTQ file was analyzed independently to evaluate sequence quality, GC content, and adapter contamination. FastQC was executed with the following parameters:
+
+fastqc \<input.fastq.gz\>
+
+The program generated both .zip and .html outputs for each sample, which were used for visual inspection and MultiQC aggregation.
+
+-   Genome Index Generation (STAR INDEX)
+
+To prepare the reference for alignment, STAR (v2.7.11b) was used to build a genome index from the provided FASTA and GTF files within the container ghcr.io/bf528/star:latest. The process ran under the process_high label (16 CPUs) using the command:
+
+STAR --runMode genomeGenerate\
+--runThreadN \$task.cpus\
+--genomeDir star_index\
+--genomeFastaFiles \<reference_genome.fa\>\
+--sjdbGTFfile \<annotation.gtf\>
+
+The parameters --runMode genomeGenerate, --runThreadN, --genomeDir, --genomeFastaFiles, and --sjdbGTFfile explicitly defined the mode, thread number, output directory, genome FASTA input, and annotation file respectively. All other STAR options were left at default values.
+
+-   Read Alignment to the Reference Genome (STAR ALIGN)
+
+Paired-end reads were aligned to the indexed human genome using STAR (v2.7.11b) within the same container. Each sample was processed with the following parameters:
+
+STAR --runThreadN \$task.cpus\
+--genomeDir star_index\
+--readFilesIn \<read1.fastq.gz\> \<read2.fastq.gz\>\
+--readFilesCommand zcat\
+--outFileNamePrefix <sample_prefix>.\
+--outSAMtype BAM SortedByCoordinate\
+2\> <sample_prefix>.Log.final.out
+
+The --runThreadN option defined available CPUs, --readFilesCommand zcat enabled reading compressed files, and --outSAMtype BAM SortedByCoordinate generated coordinate-sorted BAM files. Standard error (2\>) was redirected to a .Log.final.out file, which summarized mapping statistics. All unlisted parameters used STAR’s defaults.
+
+-   Quantifying Gene Expression (VERSE)
+
+Aligned reads were quantified at the exon level using VERSE (v0.1.5) within the ghcr.io/bf528/verse:latest container. This process was using the command:
+
+verse -a \<annotation.gtf\> -s -o <sample_prefix> \<input.bam\>
+
+-a specified the GTF annotation file, -s indicated stranded counting mode, and -o defined the output prefix for each sample.
+
+Each run produced an output file named <sample_prefix>.exon.txt, containing two columns: gene identifier and raw read count. All other VERSE parameters were kept at default values.
+
+-   Post-Alignment Quality Aggregation (MULTIQC)
+
+Quality-control metrics from both FastQC and STAR were aggregated using MultiQC (v1.25) within the ghcr.io/bf528/multiqc:latest container. All relevant .zip, .html, and .Log.final.out files were collected into a single directory and analyzed with:
+
+multiqc -f .
+
+The -f flag allowed overwriting existing reports. The output file multiqc_report.html summarized overall sequencing quality, adapter content, and alignment performance for all samples.
+
+-   Combining Gene Counts (CONCAT_COUNTS)
+
+Individual count tables from VERSE were merged into a single matrix using a custom Python script (concat_counts.py) executed in the ghcr.io/bf528/pandas:latest container. This script concatenated all exon-level count files column-wise, replacing missing values with zeros. The command was:
+
+python concat_counts.py -i <list_of_exon_files> -o counts_matrix.tsv
+
+The -i argument accepted multiple VERSE output files, and -o specified the name of the merged matrix file. The resulting matrix contained genes as rows and samples as columns.
+
+-   Workflow
+
+In the nextflow pipeline main.nf, raw paired-end FASTQ files were paired using Channel.fromFilePairs and processed by FASTQC to assess sequencing quality. In parallel, PARSE_GTF extracted gene identifiers from the reference GTF, and STAR generated the genome index used by STAR_ALIGN for read alignment to the reference genome. Alignment outputs, including sorted BAM files and log summaries, were aggregated by MULTIQC to produce an overall quality report. Aligned reads were then quantified at the exon level using VERSE, and the resulting count tables were merged by CONCAT_COUNTS into a unified counts_matrix.tsv for downstream DESeq2 analysis.
+
+-   Differential Expression Analysis
+
+Downstream statistical analysis was performed in R (version 4.4.3) using the DESeq2 package. The merged count matrix and sample metadata were imported, and a DESeqDataSet object was constructed using the design formula \~ condition (experimental vs. control). DESeq2 normalized counts using the median-of-ratios method and estimated gene-wise dispersions and fold changes using the Wald test. Genes with adjusted p-values (padj) \< 0.05 and \|log₂FoldChange\| \> 1 were considered significantly differentially expressed. All DESeq2 functions were executed with default parameters.
+
+-   Normalization and Quality Control
+
+To assess sample variability and normalization performance, counts were transformed using the regularized log transformation (rlog(dds, blind = TRUE)). Principal component analysis (PCA) was performed using DESeq2’s plotPCA() function, and the first two principal components (PC1 and PC2) were plotted to visualize clustering by condition. A sample-to-sample distance matrix was computed using dist(t(assay(rld))) and visualized as a heatmap using pheatmap. All steps used default parameters unless otherwise specified.
+
+-   Functional Enrichment and Gene Set Analysis
+
+Functional enrichment analyses were performed using both over-representation and gene set enrichment approaches.
+
+Over-Representation Analysis (ORA): Significantly up and down regulated gene lists were exported from DESeq2 and analyzed separately using the Enrichr web tools. Each gene list was tested for enrichment in the WikiPathways 2024 Human pathway databases. Default settings were used for both platforms.
+
+Gene Set Enrichment Analysis (GSEA) The complete ranked gene list was analyzed using the fgsea package in R. Canonical pathway sets were imported from the MSigDB C2 collection in Gene Symbol format. The fgsea() function was executed as follows:
+
+fgsea(pathways, rnk_list, minSize = 15, maxSize = 500)
+
+Pathways were considered significant if padj \< 0.05. Enrichment plots were generated using plotEnrichment(), and the top 10 up and down regulated pathways were visualized using plotGseaTable().
+
+-   Visualization and Reporting
+
+A volcano plot was generated using ggplot2, displaying log₂ fold changes versus –log₁₀(padj) to highlight significant genes. PCA and heatmap plots summarized global transcriptomic variation and sample similarity.
+
+## Quality Control Evaluation
+
+The total number of reads across all samples ranged from approximately 80 to 110 million paired-end reads per sample. FastQC analysis did not flag any major quality issues across samples, and per-base sequence quality scores remained high throughout the read length. Less than 1% of reads in all 12 samples were identified as overrepresented sequences, and no adapter contamination was detected.
+
+STAR alignment showed consistently high mapping rates across all six samples, with 95.8–97.8% of reads successfully aligned to the reference genome. Among these, 91.9–94.0% were uniquely mapped, and the mismatch rate remained low at approximately 0.2%. The average mapped read length was around 199 bp. Based on the overall quality metrics from both FastQC and STAR, the sequencing data were of high quality and suitable for downstream differential expression analysis.
+
+Load the DESeq2 Library and tidyverse
+
+```{r,include=FALSE}
+library(DESeq2)
+library(tidyverse)
+```
+
+### colData
+
+We also build what DESeq2 refers to as the colData, which is a dataframe that describes the sample ids and whether they are control group or experimental group samples.
+
+```{r}
+coldata <- read.csv('results/coldata.csv')
+coldata
+```
+
+### Read in the counts matrix
+
+R has a number of built-in functions to read from a dataframe / csv. We use `read.csv` to read in the contents of the counts_matrix.tsv file.
+
+```{r}
+cts <- as.matrix(read.delim("results/counts_matrix.tsv", row.names='gene'))
+cts <- cts[, coldata$sample_id]
+head(cts,10)
+```
+
+```{r}
+identical(colnames(cts), coldata$sample_id)
+
+```
+
+### Constructing the DESeq object
+
+Once we have all of the above inputs, we need to load them into a DESeq2 object that DESeq2 will then use to perform differential expression testing.
+
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = cts,
+                              colData = coldata,
+                              design = ~ condition)
+
+```
+
+You can see that we have provided the DESeqDataSetFromMatrix function the necessary inputs and this pre-built function will generate a DESeq2 object, which is often named dds.
+
+## Filtering the counts matrix
+
+To improve the reliability of the differential expression analysis, genes with low read counts across samples were filtered out prior to running DESeq2. Specifically, genes were required to have at least 10 read counts in a minimum of three samples, corresponding to the smallest experimental group size. This criterion ensures that only genes with sufficient expression evidence across biological replicates are retained for downstream analysis. Before filtering, a total of 63,241 genes were present in the dataset, which was reduced to 20,579 genes after applying the threshold.
+
+The distribution plots below illustrate this change: before filtering, the majority of genes exhibited low total counts (log₁₀ counts \< 2), whereas after filtering, the distribution shifted toward higher counts, indicating the effective removal of lowly expressed and uninformative genes. This filtering step enhances statistical power and reduces noise in subsequent differential expression analyses.
+
+```{r}
+smallestGroupSize <- 3
+
+counts_before <- counts(dds)
+tot_before <- rowSums(counts_before)
+
+
+keep <- rowSums(counts_before >= 10) >= smallestGroupSize
+n_before <- nrow(dds)
+dds <- dds[keep, ]
+n_after <- nrow(dds)
+
+counts_after <- counts(dds)
+tot_after <- rowSums(counts_after)
+
+cat("Genes before filtering:", n_before, "\n")
+cat("Genes after filtering:", n_after, "\n")
+
+
+par(mfrow=c(1,2))  
+hist(log10(tot_before + 1),
+     main="Counts Distribution (Before Filtering)",
+     xlab="log10 Total Counts per Gene",
+     col="skyblue", border="white")
+hist(log10(tot_after + 1),
+     main="Counts Distribution (After Filtering)",
+     xlab="log10 Total Counts per Gene",
+     col="seagreen", border="white")
+par(mfrow=c(1,1))  
+
+```
+
+```{r}
+cat("Genes before filtering:", n_before, "\n")
+cat("Genes after filtering:", n_after, "\n")
+```
+
+### Running DESeq
+
+Once you have your object, you will run DESeq2 as such:
+
+```{r}
+dds <- DESeq(dds)
+res <- results(dds, contrast=c("condition","exp","control"))
+
+```
+
+The results function can extract the results of interest from the dds object where the DESeq2 software stored both the input and the outputs it generated.
+
+The following code simply orders the results by those with the lowest padj.
+
+```{r}
+resOrdered <- res[order(res$padj),]
+sorted_padj_res <- as_tibble(resOrdered, rownames='gene')
+head(sorted_padj_res,10)
+```
+
+## Differential Expression Analysis
+
+### 1. Table of the top 10 differentially expressed genes and the statistics provided by DESeq2 as ranked by adjusted p-value
+
+The DESeq2 results were ranked by adjusted p-value (padj) to identify the top 10 most significantly differentially expressed genes between the experimental and control groups. Each gene entry includes the baseMean, log₂ fold change, standard error, Wald statistic, and p-values, summarizing both the magnitude and reliability of expression changes. These top genes represent those with the strongest statistical evidence for differential expression and will guide downstream biological interpretation.
+
+```{r}
+summary(res)
+
+```
+
+### Joining our gene names
+
+Most languages that allow you to manipulate dataframes (tabular, 2-dimensional data) enable you to perform `join` operations. These are ways of joining two different dataframes or tables together on some common column.
+
+Read in our output from `PARSE_GTF`. Use a tidyverse function to read in the gene_ids_to_names.txt file as a tibble. You may view the file if that helps you figure out which function to use. When you read in the file, ensure that you name the columns `gene` and `symbol`, respectively.
+
+Print out the file you read in as a tibble.
+
+```{r}
+ids<- read_tsv("results/gene_ids_to_names.txt", skip = 1, col_names = c("gene", "symbol"))
+head(ids,10)
+```
+
+Notice how the gene column matches up with the gene column in our DESeq2 results. We can use this column to join the information from the dataframe (tibble) we just created with our DESeq2 results. The `%>%` is a tidyverse function that operates similarly to the bash pipe `|`.
+
+Use left_join function and the `%>%` to join the deseq2_res dataframe with the dataframe you just created above. When you manage to do this, your new dataframe should have all of the columns from the DESeq2 output as well as a new column for the gene symbols. Save this to the same dataframe and overwrite it (sorted_padj_res)
+
+```{r}
+sorted_padj_res <- sorted_padj_res %>%
+  left_join(ids) %>%
+  relocate(symbol)
+
+head(sorted_padj_res, 10)
+
+```
+
+The most basic of gene set enrichment analyis is to use a webtool like DAVID or EnrichR on a list of significantly differentially expressed genes.
+
+To do this, we need to threshold our list of genes by some metric and we will often choose a padj threshold.
+
+### 2. A padj threshold and report the number of significant genes at this threshold
+
+A significance threshold of adjusted p-value (padj) \< 0.05 was applied to identify differentially expressed genes. Genes with log₂ fold change \> 1 were classified as upregulated, while those with log₂ fold change \< −1 were considered downregulated. Based on these criteria, 106 genes were upregulated and 177 genes were downregulated. The resulting gene lists were exported as text files (upreg_sig_genes.txt and downreg_sig_genes.txt) for downstream functional enrichment analysis using DAVID or Enrichr, enabling the identification of biological pathways and processes associated with these significant genes.
+
+### 3. DAVID or ENRICHR analysis and the biological processes
+
+\*The Enrichr WikiPathways 2024 Human analysis revealed distinct biological themes among the upregulated and downregulated gene sets. Upregulated genes were significantly enriched in pathways related to cardiac and metabolic functions, including Arrhythmogenic Right Ventricular Cardiomyopathy, Gastric Acid Production, and Enterohepatic Circulation of Bile Acids. These results indicate increased activity in structural remodeling, metabolism, and stress-related signaling upon TYK2 knockout. In contrast, downregulated genes were enriched in pathways related to neural and developmental processes, such as Chronic Hyperglycemia Impairment of Neuron Function, Heart Development, and PI3K-Akt Signaling. This suggests that TYK2 loss suppresses differentiation and neuronal lineage programs, aligning with the observed decrease in endocrine or β-cell developmental markers.
+
+### 4. Fgsea results
+
+The fgsea analysis using the MSigDB C2 canonical pathways identified both up- and downregulated pathways consistent with the Enrichr results, but with additional resolution due to the ranked-based approach. Pathways with positive normalized enrichment scores (NES) included P53 Downstream Signaling, IL-18 Signaling, and Extracellular Matrix Organization, reflecting enhanced cellular stress response, immune signaling, and extracellular remodeling. Pathways with negative NES values, such as Neuronal System, Regulation of β-cell Development, and Synaptic Vesicle Pathway, indicated downregulation of neuronal and secretory activity. These results highlight a transcriptional shift from neuroendocrine differentiation toward structural and immune-associated programs.
+
+### 5.Compare the results from DAVID/ENRICHR analysis and fgsea analysis
+
+Both Enrichr and fgsea analyses converged on a similar biological interpretation—TYK2 knockout enhances stress and extracellular matrix pathways while suppressing neuronal and developmental processes. However, the Enrichr (ORA) method relies on a discrete gene list filtered by significance thresholds, capturing the most strongly affected pathways, whereas fgsea considers all genes ranked by expression change, revealing subtler coordinated effects. As a result, fgsea identified additional immune and stress-related pathways that were not detected by Enrichr, while Enrichr emphasized bile acid and cardiomyopathy pathways specific to highly differentially expressed genes. Together, these complementary approaches provide a comprehensive view of the molecular impact of TYK2 loss.
+
+```{r}
+upreg_sig_genes <- sorted_padj_res %>%
+  filter(padj < 0.05 & log2FoldChange > 1) %>%
+  select(symbol)
+write.table(upreg_sig_genes, file = "upreg_sig_genes.txt",
+            col.names = F, row.names = F, quote = F)
+upreg_sig_genes_count <- nrow(upreg_sig_genes)
+
+# Filter downregulated genes with padj < 0.05
+downreg_sig_genes <- sorted_padj_res %>%
+  filter(padj < 0.05 & log2FoldChange <= -1) %>%
+  select(symbol)
+write.table(downreg_sig_genes, file = "downreg_sig_genes.txt",
+            col.names = F, row.names = F, quote = F)
+downreg_sig_genes_count <- nrow(downreg_sig_genes)
+
+# Display counts
+print(paste("Upregulated Genes:", upreg_sig_genes_count))
+print(paste("Downregulated Genes:", downreg_sig_genes_count))
+
+```
+
+“The blind argument should be set to TRUE for exploratory analysis (e.g., PCA, clustering), and to FALSE for visualization of results where the design is known and desired to be preserved.”
+
+```{r}
+rld <- rlog(dds, blind = TRUE)
+```
+
+## RNAseq Quality Control
+
+### PCA plot
+
+-   PCA analysis Principal Component Analysis (PCA) was performed on the rlog-transformed count data to assess overall sample variation. PC1 accounted for 86% of the total variance and successfully separated the control and experimental groups, indicating that the main source of variation arises from biological treatment effects rather than technical noise. PC2 explained 10% of the variance and revealed that the three control replicates clustered tightly together, demonstrating excellent reproducibility. The experimental samples also grouped together; however, exp_rep1 showed a slight deviation along PC2, suggesting minor within-group heterogeneity that could reflect biological variability or technical factors such as differences in library concentration or sequencing depth. In summary, the PCA demonstrates strong treatment-specific expression differences and consistent data quality across replicates.
+
+```{r}
+plotPCA(rld, intgroup = "condition")
+```
+
+### Sample-to-sample distance matrix
+
+-   Sample-to-sample distance heatmap A heatmap of sample-to-sample distances confirmed the PCA results. Biological replicates from the same condition showed small pairwise distances (blue regions), while control and experimental samples displayed larger cross-group distances (orange-red regions), indicating strong condition-driven expression differences. The tight clustering among control samples and the mostly consistent clustering among experimental samples reflect high reproducibility and minimal batch effects. The slightly higher distance for exp_rep1 mirrors its position in the PCA plot, suggesting mild variation but not enough to compromise downstream analyses. These QC results indicate that the RNA-seq data are reliable and suitable for differential expression and pathway analysis
+
+```{r}
+library("pheatmap")
+sampleDists <- dist(t(assay(rld)))
+pheatmap(as.matrix(sampleDists), main = "Sample-to-sample distances")
+```
+
+### Performing GSEA (Broad Methodology)
+
+To perform GSEA (broad methodology), we need two main pieces of data: 1. A ranked list of all of the genes discovered in our experiment, 2. A collection of gene sets.
+
+We already have the first element (though we will need to manipulate our data into the right format) and we can obtain the second, a collection of gene sets, from the MSigDB hosted by the Broad.These gene sets are stored in a GMT format, which you can view as a text file. I included one in the repo but you could just as easily download it from the Broad yourself.
+
+### Installing fgsea
+
+The fgsea package, which is a re-implementation of the original GSEA algorithm (Broad) with a number of improvements.
+
+```{r, include=FALSE}
+BiocManager::install("fgsea")
+
+```
+
+```{r}
+library(fgsea)
+```
+
+### Generated a ranked list of our genes by Log2FoldChange
+
+In order to run GSEA, we need aranked list of genes that have no duplicate values, no NA values, and is ranked by descending log2FoldChange.
+
+Use sorted_padj_res tibble and a combination of the following functions to generate a dataframe (tibble) with the right format: drop_na(), distinct(), arrange() and desc(). When you think you have managed this, save the tibble to a new variable called `deseq2_res_ordered`
+
+Once you have the tibble, use the `setNames` function and the notation, `deseq2_res_ordered$log2FoldChange` and `deseq2_res_ordered$symbol` to create a ranked named list of your genes by log2FoldChange.
+
+```{r}
+deseq2_res_ordered <- sorted_padj_res %>% 
+  drop_na() %>% 
+  distinct(symbol, .keep_all = TRUE) %>%
+  arrange(desc(log2FoldChange))
+
+rnk_list <- setNames(deseq2_res_ordered$log2FoldChange, deseq2_res_ordered$symbol)
+head(rnk_list, 10)
+```
+
+### Read in the GMT file
+
+fgsea provides a convenience function that will read in our gene set collection in the format that it requires to run.
+
+```{r}
+pathways <- gmtPathways("c2.cp.v2025.1.Hs.symbols.gmt")
+head(pathways)
+
+```
+
+### Running FGSEA
+
+The minSize and maxSize control which gene sets are used based on how many genes are contained within each gene set. It has been empirically found that the GSEA methodology does not perform well on gene sets that are either too small or too large.
+
+```{r}
+fgseaRes <- fgsea(pathways, rnk_list, minSize=15, maxSize=500)
+```
+
+```{r}
+head(fgseaRes[order(pval), ])
+```
+
+```{r}
+plotEnrichment(pathways[["REACTOME_CELL_CYCLE_CHECKPOINTS"]],
+               rnk_list) + labs(title="REACTOME_CELL_CYCLE_CHECKPOINTS")
+
+```
+
+### Plotting multiple results
+
+I simply copied this code from their vignette. All it does is grab pathways with a positive and negative enrichment score and order them by p-value.
+
+-   fgsea result
+
+```{r}
+topPathwaysUp <- fgseaRes[ES > 0][head(order(pval), n=10), pathway]
+topPathwaysDown <- fgseaRes[ES < 0][head(order(pval), n=10), pathway]
+topPathways <- c(topPathwaysUp, rev(topPathwaysDown))
+plotGseaTable(pathways[topPathways], rnk_list, fgseaRes, 
+              gseaParam=0.5)
+
+
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(forcats)
+
+# Assume fgseaRes already exists
+# Select top 10 upregulated and top 10 downregulated pathways
+top_up <- fgseaRes %>%
+  filter(NES > 0) %>%
+  arrange(padj) %>%
+  slice_head(n = 10)
+
+top_down <- fgseaRes %>%
+  filter(NES < 0) %>%
+  arrange(padj) %>%
+  slice_head(n = 10)
+
+# Combine both
+top_pathways <- bind_rows(top_up, top_down)
+
+# Clean pathway names (optional)
+top_pathways$pathway <- gsub("REACTOME_|WP_|PID_|BIOCARTA_", "", top_pathways$pathway)
+top_pathways$pathway <- gsub("_", " ", top_pathways$pathway)
+
+# Order by NES for plotting
+top_pathways <- top_pathways %>%
+  mutate(pathway = fct_reorder(pathway, NES))
+
+# Define color scheme
+cols <- c("Upregulated (NES > 0)" = "#D65244",   # red
+          "Downregulated (NES < 0)" = "#3A86FF") # blue
+
+# Add direction column
+top_pathways <- top_pathways %>%
+  mutate(direction = ifelse(NES > 0, "Upregulated (NES > 0)", "Downregulated (NES < 0)"))
+
+# --- Plot ---
+ggplot(top_pathways, aes(x = NES, y = pathway, fill = direction)) +
+  geom_col(width = 0.7) +
+  scale_fill_manual(values = cols) +
+  theme_minimal(base_size = 7) +
+  labs(
+    title = "Top Enriched Pathways (GSEA)",
+    x = "Normalized Enrichment Score (NES)",
+    y = NULL,
+    fill = "Pathway Direction"
+  ) +
+  geom_vline(xintercept = 0, color = "grey40", linetype = "dashed") +
+  theme(
+    plot.title = element_text(face = "bold", size = 15, hjust = 0.5),
+    axis.text.y = element_text(face = "bold"),
+    legend.position = "top"
+  )
+```
+
+## Replicate figure 3C and 3F
+
+-   In the original study by Chandra et al. (2022), differential expression analysis at Stage 5 identified 319 upregulated and 412 downregulated genes in TYK2 KO cells compared with wild-type controls. Using the same adjusted p-value threshold (padj \< 0.05) but applying an additional fold-change filter (\|log₂FC\| ≥ 1), our analysis detected 106 upregulated and 177 downregulated genes. The smaller number of DEGs in our dataset likely reflects the more stringent fold-change criterion, differences in normalization methods, and variation between data-processing pipelines. Despite these quantitative differences, both analyses consistently demonstrate the strong transcriptional impact of TYK2 loss at the endocrine progenitor (Stage 5) stage.
+
+-   The volcano plot reproduced a similar expression pattern to Figure 3C of the original paper. Genes associated with neuronal differentiation and β-cell identity—such as PAX6, NEUROD1, and ONECUT1—were significantly down-regulated, whereas extracellular-matrix-related genes including COL2A1, LAMB2, and SPP1 were up-regulated. These patterns confirm the loss of endocrine lineage commitment and the activation of structural and signaling pathways upon TYK2 knockout. Overall, the distribution and polarity of DEGs between up- and down-regulated clusters align well with the reported transcriptional reprogramming in the original study.
+
+-   Compared the enrichment results with those reported by Chandra et al. (2022). Using the MSigDB C2 canonical pathway collection (c2.cp.v2025.1.Hs), the fgsea analysis revealed upregulated pathways related to extracellular matrix organization, integrin signaling, and glucuronidation, while downregulated pathways were enriched for neuronal system and β-cell development. These findings closely mirrored the published study, which also identified suppression of neuronal and β-cell differentiation programs alongside activation of extracellular matrix and receptor signaling. Minor discrepancies, such as the additional detection of P53 downstream and IL-18 signaling pathways in our results, might arose from methodological differences, including our use of stricter \|log₂FC\| ≥ 1 thresholds, continuous gene ranking, and integration of fgsea and Enrichr tools, compared with the analysis used in the original paper. Despite these variations, both analyses converge on the conclusion that TYK2 disruption suppresses neuronal differentiation while promoting extracellular matrix remodeling during endocrine progenitor development.
+
+-   volcano plot
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+library(scales)
+
+res <- sorted_padj_res %>%
+  mutate(
+    negLog10P = -log10(pvalue),
+    status = case_when(
+      padj < 0.05 & log2FoldChange >=  1 ~ "Up",
+      padj < 0.05 & log2FoldChange <= -1 ~ "Down",
+      TRUE ~ "NS"
+    )
+  )%>%
+  filter(negLog10P <=35)
+
+force_genes <- c("INSM1","NEUROD1","ONECUT1","PAX4","PAX6",
+                 "DUSP6","KRAS","SPP1","LAMB2","COL2A1")
+
+force_df <- res %>%
+  mutate(symbol_upper = toupper(symbol)) %>%
+  filter(symbol_upper %in% toupper(force_genes)) %>%
+  distinct(symbol, .keep_all = TRUE)
+
+n_label <- 14
+lab_up   <- res %>% filter(status == "Up")   %>% arrange(padj) %>% 
+  filter(!(symbol %in% force_df$symbol)) %>% slice_head(n = n_label)
+lab_down <- res %>% filter(status == "Down") %>% arrange(padj) %>% 
+  filter(!(symbol %in% force_df$symbol)) %>% slice_head(n = n_label)
+labs_df  <- bind_rows(lab_up, lab_down)
+
+
+x_min <- -6; x_max <- 12   
+y_max <- 35                
+
+cols <- c("Down"="#02B3C8", "Up"="#F05A71", "NS"="grey78")
+
+alpha_zone <- 0.07
+thr_x <- 1
+thr_y <- -log10(0.05)
+
+p_volcano <- ggplot(res, aes(x = log2FoldChange, y = negLog10P)) +
+  annotate("rect",
+           xmin = thr_x, xmax = Inf, ymin = thr_y, ymax = Inf,
+           fill = "#F05A71", alpha = alpha_zone) +
+  annotate("rect",
+           xmin = -Inf, xmax = -thr_x, ymin = thr_y, ymax = Inf,
+           fill = "#02B3C8", alpha = alpha_zone) +
+
+  geom_point(data = subset(res, status == "NS"),
+             aes(color = status), size = 1.5, alpha = 0.5) +
+  geom_point(data = subset(res, status != "NS"),
+             aes(color = status), size = 1.8, alpha = 0.85) +
+
+  geom_vline(xintercept = c(-thr_x, thr_x), linetype = "dashed", color = "grey55") +
+  geom_hline(yintercept = thr_y, linetype   = "dashed", color = "grey55") +
+
+  geom_text_repel(
+    data = labs_df,
+    aes(label = symbol, color = status),
+    size = 3.0, max.overlaps = 100,
+    box.padding = 0.35, point.padding = 0.25,
+    segment.color = "grey55", min.segment.length = 0
+  ) +
+
+  geom_point(data = force_df,
+             aes(x = log2FoldChange, y = negLog10P),
+             shape = 21, size = 3.0, stroke = 1.0, color = "black", fill = NA) +
+  geom_text_repel(
+    data = force_df,
+    aes(label = symbol),
+    size = 3.2, fontface = "bold",
+    box.padding = 0.40, point.padding = 0.30,
+    segment.color = "black", max.overlaps = Inf, force = 6,
+    min.segment.length = 0
+  ) +
+
+  scale_color_manual(values = cols) +
+  coord_cartesian(xlim = c(x_min, x_max), ylim = c(0, y_max), expand = 0) +
+  scale_x_continuous(breaks = pretty(c(x_min, x_max), n = 6)) +
+  scale_y_continuous(breaks = pretty(c(0, y_max), n = 6)) +
+
+  labs(
+    title = "Volcano plot",
+    x = "Expression difference (log2 fold change)",
+    y = expression(-log[10](p~value)),
+    color = NULL,
+    caption = "Thresholds: |log2FC| ≥ 1 & padj < 0.05 (dashed lines). Shaded = significant zones."
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "right",
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold"),
+    plot.caption = element_text(color = "grey40")
+  )
+
+p_volcano
+```
+
+-   enrichment results
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(forcats)
+library(scales)
+
+enr <- fgseaRes %>%
+  mutate(
+    leading_n = vapply(leadingEdge, length, integer(1)),
+    percent   = 100 * leading_n / size,
+    direction = if_else(NES >= 0, "Upregulated (NES > 0)", "Downregulated (NES < 0)"),
+    pathway = gsub("REACTOME_|WP_", "", pathway)
+  )
+
+# top5 significant pathways
+top_n <- 5
+top_up <- enr %>% filter(NES > 0)  %>% arrange(padj) %>% slice_head(n = top_n)
+top_dn <- enr %>% filter(NES < 0)  %>% arrange(padj) %>% slice_head(n = top_n)
+enr_top <- bind_rows(top_up, top_dn) %>%
+  group_by(direction) %>%
+  mutate(pathway = fct_reorder(pathway, -log10(padj))) %>%  # 
+  ungroup()
+
+# plot
+ggplot(enr_top, aes(x = percent, y = pathway, fill = padj)) +
+  geom_col(width = 0.6) +
+  facet_grid(rows = vars(direction), scales = "free_y", space = "free_y") +
+  scale_fill_gradientn(
+    colours = c("#FF0000", "#4169E1"), 
+    values = rescale(c(0.001, 0.01, 0.05)),
+    name = "Adjusted p-value"
+  ) +
+  labs(
+    title = "S5: Reactome pathway enrichment",
+    x = "Percentage of DE genes in pathway (%)",
+    y = NULL
+  ) +
+  theme_classic(base_size = 9) +
+  theme(
+    strip.text.y = element_text(face = "bold", size = 11),
+    legend.position = "right"
+  )
+```
+
+### SessionInfo
+
+The sessioninfo function is one way we can attempt to be transparent about our environment management in R.
+
+This will print out a summary of the current packages installed in the environment.
+
+```{r}
+sessioninfo::session_info()
+```
