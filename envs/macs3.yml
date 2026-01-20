@@ -1,8 +1,0 @@
-name: macs3
-channels:
-  - bioconda
-  - conda-forge
-  - defaults
-dependencies:
-  - macs3=3.0.3
-  - python=3.11
